@@ -1,0 +1,103 @@
+name: Maven Release Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      perform_maven_release:
+        description: "Perform Maven release"
+        required: false
+        default: "false"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '8'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update && sudo apt install -y bash build-essential git gpg python3 python3-venv
+
+  prepare_release:
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure Git
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+          git config --global user.email "oss-release-bot@prestodb.io"
+          git config --global user.name "oss-release-bot"
+
+      - name: Determine Current Version
+        id: get_version
+        run: |
+          REPO_CURRENT_VERSION=$(mvn org.apache.maven.plugins:maven-help-plugin:3.2.0:evaluate -Dexpression=project.version -q -ntp -DforceStdout)
+          echo "current_version=${REPO_CURRENT_VERSION}"
+          echo "current_version=${REPO_CURRENT_VERSION}" >> $GITHUB_ENV
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME }}
+
+      - name: Prepare for Release
+        run: |
+          mvn release:prepare -B -DskipTests \
+              -DautoVersionSubmodules=true \
+              -DgenerateBackupPoms=false
+
+          SCM_TAG=$(grep 'scm.tag=' release.properties | cut -d= -f2)
+          echo "scm.tag=$SCM_TAG"
+          echo $SCM_TAG > repo-release-tag.txt
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME }}
+
+      - name: Save Release Tag
+        id: save_tag
+        run: echo "release_tag=$(cat repo-release-tag.txt)" >> $GITHUB_ENV
+
+  release_artifacts:
+    runs-on: ubuntu-latest
+    needs: prepare_release
+    if: ${{ github.event.inputs.perform_maven_release == 'true' && github.ref == 'refs/heads/master' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Import GPG Keys
+        run: |
+          echo "${{ secrets.GPG_SECRET }}" | base64 --decode | gpg --batch --import
+          echo "${{ secrets.GPG_TRUST }}" | gpg --import-ownertrust
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+        env:
+          GPG_SECRET: ${{ secrets.GPG_SECRET }}
+          GPG_TRUST: ${{ secrets.GPG_TRUST }}
+
+      - name: Release Artifacts to Maven Central
+        run: |
+          git checkout ${{ env.release_tag }}
+          echo mvn -s settings.xml -V -B -U -e -T2C deploy \
+              -DautoReleaseAfterClose=true \
+              -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
+              -DkeepStagingRepositoryOnCloseRuleFailure=true \
+              -DkeepStagingRepositoryOnFailure=true \
+              -DskipTests \
+              -Poss-release \
+              -Pdeploy-to-ossrh \
+              -DstagingProgressTimeoutMinutes=10
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          JAVA_HOME: ${{ env.JAVA_HOME }}
+
+      - name: Push Git Tags
+        run: |
+          echo git push --follow-tags --set-upstream https://${{ secrets.GITHUB_OSS_TOKEN }}@github.com/prestodb/airbase.git master
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME }}
