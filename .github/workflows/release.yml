@@ -37,6 +37,7 @@ jobs:
           git config --global user.email "oss-release-bot@prestodb.io"
           git config --global user.name "oss-release-bot"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          git fetch origin
 
       - name: Determine Current Version
         id: get_version
